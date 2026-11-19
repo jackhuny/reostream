@@ -205,6 +205,7 @@ func New(cams []config.Camera, run Runner) *Supervisor {
 	}
 	for _, cam := range cams {
 		s.talkGain[cam.Name] = cam.TalkGainDB
+		warnBatteryRTSP(cam)
 		streams, _ := cameraStreams(cam)
 		for _, st := range streams {
 			// One hub per camera+stream name so subscribers pick a specific
@@ -218,14 +219,48 @@ func New(cams []config.Camera, run Runner) *Supervisor {
 	return s
 }
 
-// cameraStreams is the streams a camera runs. A battery camera that lists
-// none gets sub and main on demand: they exist so a viewer can wake it,
-// and run only while one is watching.
+// cameraStreams is the streams a camera runs. A battery camera's streams
+// are on demand whatever its streams list says: they exist so a viewer can
+// wake it, and run only while one is watching. Only always_on holds one
+// awake. A battery camera that lists none gets sub and main.
+//
+// Listing streams used to make a battery camera's streams run like a wired
+// camera's, around the clock, with nothing in the config saying so: the
+// camera never slept, never woke for motion, and lost about 1% of battery
+// an hour (#38, a Solar Floodlight Cam whose owner had followed the RTSP
+// 404's advice to add "sub" to streams and rtsp).
+//
+// main is always among them, listed or not: it is the stream the presence
+// stream and motion wakes hang off.
 func cameraStreams(cam config.Camera) (streams []string, onDemand bool) {
-	if len(cam.Streams) == 0 && cam.UID != "" {
+	if cam.UID == "" {
+		return cam.Streams, false
+	}
+	if len(cam.Streams) == 0 {
 		return []string{"sub", "main"}, true
 	}
-	return cam.Streams, false
+	streams = slices.Clone(cam.Streams)
+	if !slices.Contains(streams, "main") {
+		streams = append(streams, "main")
+	}
+	return streams, true
+}
+
+// warnBatteryRTSP logs once at start when a battery camera's rtsp list
+// names a stream other than main. Over RTSP a battery camera serves only
+// its presence stream, /<camera>, which a recorder can hold open without
+// keeping the camera awake; its other streams run only for a viewer on
+// reostream's page. The list is not refused, since a config written for
+// 0.2.8 (#38) would then stop reostream from starting.
+func warnBatteryRTSP(cam config.Camera) {
+	if cam.UID == "" {
+		return
+	}
+	for _, st := range cam.RTSP {
+		if st != "main" {
+			log.Printf("supervisor: %s: rtsp lists %q, but a battery camera serves only /%s over RTSP, so it can sleep; its %s stream plays on reostream's page while someone watches", cam.Name, st, cam.Name, st)
+		}
+	}
 }
 
 func newEntry(cam config.Camera, st string) *entry {
@@ -357,6 +392,22 @@ func (s *Supervisor) setBackoff(start, max, reset time.Duration) {
 	s.backoffStart = start
 	s.backoffMax = max
 	s.backoffReset = reset
+}
+
+// failKey is the name a stream's failures and its recovery are logged
+// under. For most streams that is the camera: a camera that cannot be
+// reached fails on every stream at once, and failures.go says so once. A
+// zoom stream is its own, "cam-19/zoom": the zoom lens fails on its own
+// while the wide lens streams on (no zoom video over Baichuan, its RTSP
+// off, both main stream slots taken), and "cam-19: now can't reach the
+// camera" read as the whole TrackMix being down when only the zoom stream
+// was retrying (11-03). Keyed apart, it also no longer flips the camera's
+// own line between its reason and the wide streams'.
+func failKey(cfg stream.Config) string {
+	if cfg.Stream == "zoom" || cfg.Stream == "zoom_sub" {
+		return hubName(cfg.Name, cfg.Stream)
+	}
+	return cfg.Name
 }
 
 // hubName is the key streams are published under and looked up by:
@@ -709,7 +760,11 @@ func (s *Supervisor) runStream(ctx context.Context, e *entry) {
 		e.stat.started = start
 		s.mu.Unlock()
 		// A failing camera coming back is noticed as soon as this run
-		// delivers, not when it next ends.
+		// delivers, not when it next ends. Delivers means a frame: the
+		// hub is marked connected as soon as the camera takes the stream
+		// request, and a TrackMix zoom lens takes it and then sends
+		// nothing for 30 s, so "back after 2m" was logged on every retry
+		// of a zoom stream that never came back (11-03).
 		running := make(chan struct{})
 		go func(cam string) {
 			t := time.NewTicker(time.Second)
@@ -719,13 +774,13 @@ func (s *Supervisor) runStream(ctx context.Context, e *entry) {
 				case <-running:
 					return
 				case <-t.C:
-					if !e.h.Stats().ConnectedAt.IsZero() {
+					if e.h.Stats().LastFrameAt.After(start) {
 						s.noteRecovered(cam)
 						return
 					}
 				}
 			}
-		}(e.cfg.Name)
+		}(failKey(e.cfg))
 		err := s.run(ctx, e.cfg, e.h)
 		close(running)
 		ran := time.Since(start)
@@ -774,14 +829,14 @@ func (s *Supervisor) runStream(ctx context.Context, e *entry) {
 		// two streams sat at 19 restarts with an empty container log, which
 		// told an operator nothing about what to fix.
 		if err != nil && ctx.Err() == nil {
-			s.noteFailure(e.cfg.Name, err)
+			s.noteFailure(failKey(e.cfg), err)
 		}
 
 		select {
 		case <-ctx.Done():
 			e.h.Close()
 			return
-		case <-time.After(retryAfter(err, backoff)):
+		case <-time.After(retryWait(err, backoff)):
 		}
 
 		// Only reached by actually looping back to run again, so this
@@ -873,6 +928,10 @@ const authRetry = 5 * time.Minute
 // camera whose main stream slots are likely taken, and at the usual backoff
 // that repeats about once a minute for as long as they stay taken.
 const zoomRetry = 2 * time.Minute
+
+// retryWait is retryAfter; a test shortens it to see a zoom stream's
+// next run without waiting out zoomRetry.
+var retryWait = retryAfter
 
 func retryAfter(err error, backoff time.Duration) time.Duration {
 	if errors.Is(err, baichuan.ErrUnauthorized) {

@@ -3,7 +3,6 @@ package rtsp
 import (
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +12,8 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 	"github.com/pion/rtp"
+
+	"github.com/VoltTech21/reostream/internal/config"
 )
 
 // writeQueueSize is how many RTP packets each session's write queue holds,
@@ -54,6 +55,19 @@ type Server struct {
 	// hinted holds the missing paths already logged with a hint, so a
 	// recorder retrying every second logs it once.
 	hinted map[string]bool
+
+	// battery reports whether a camera name is a battery camera, whose
+	// other streams are never served here. See SetBattery.
+	battery func(camera string) bool
+}
+
+// SetBattery tells the server which cameras are battery cameras. Over RTSP
+// one serves only /<camera>, its presence stream, and a 404 for any other
+// of its paths says so instead of telling the reader to list the stream in
+// streams and rtsp, which no longer serves it and used to keep the camera
+// awake around the clock (#38). Call before Start.
+func (s *Server) SetBattery(battery func(camera string) bool) {
+	s.battery = battery
 }
 
 // RequireLogin makes every DESCRIBE and SETUP carry this username and
@@ -258,11 +272,14 @@ func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Re
 // main.
 var streamSuffixes = []string{"_zoom_sub", "_zoom", "_sub", "_extern"}
 
-// served lists the paths served for the camera a missing path names, so a
+// served lists the paths set up for the camera a missing path names, so a
 // 404 can say where that camera's video is. A recorder pointed at /gate when
 // only gate_sub is turned on is the usual case: the camera is there, the
-// stream is not. Nothing is listed for a name that is no camera at all.
-func (s *Server) served(path string) []string {
+// stream is not. Nothing is listed for a name that is no camera at all. A
+// path with no keyframe yet is listed too, marked so (config.ServedList):
+// it used to be left out, so the RTSP 404 and the HTTP .ts one named
+// different streams for the same camera (11-04).
+func (s *Server) served(path string) []config.ServedPath {
 	path = strings.Trim(path, "/")
 	cams := []string{path}
 	for _, suf := range streamSuffixes {
@@ -273,14 +290,17 @@ func (s *Server) served(path string) []string {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []string
+	var out []config.ServedPath
+	seen := map[string]bool{}
 	for _, cam := range cams {
-		for _, p := range append([]string{cam}, suffixed(cam)...) {
-			if p == path {
+		for _, o := range config.NotServedOrder {
+			p := cam + o.Suffix
+			if p == path || seen[p] {
 				continue
 			}
-			if st, ok := s.streams[p]; ok && st.Ready() && !slices.Contains(out, p) {
-				out = append(out, p)
+			if st, ok := s.streams[p]; ok {
+				seen[p] = true
+				out = append(out, config.ServedPath{Path: "/" + p, Video: st.Ready()})
 			}
 		}
 	}
@@ -296,20 +316,40 @@ func suffixed(cam string) []string {
 }
 
 // notFound answers a path that is not served. When the camera it names has
-// other streams served, the status line says which, since that is all most
-// clients show of a failed DESCRIBE, and the log says it once per path.
+// other streams set up, the status line says which, since that is all most
+// clients show of a failed DESCRIBE, and the log says it once per path. A
+// path that is set up but has had no video yet is not "not served": it used
+// to be told to turn on a stream that was on (cam-19 main, its slots held
+// elsewhere, 11-04), and now says it is waiting for the camera.
 func (s *Server) notFound(path string) *base.Response {
 	res := &base.Response{StatusCode: base.StatusNotFound}
 	others := s.served(path)
-	if len(others) == 0 {
+	path = strings.Trim(path, "/")
+	s.mu.RLock()
+	_, waiting := s.streams[path]
+	s.mu.RUnlock()
+	if len(others) == 0 && !waiting {
 		return res
 	}
-	for i, o := range others {
-		others[i] = "/" + o
+	list := config.ServedList(others)
+	stream := streamOfPath(path)
+	// what follows "rtsp: /<path> " in the log line.
+	var hint string
+	if waiting {
+		hint = "is on in reostream, but the camera has sent no video for it yet"
+		if list != "" {
+			hint += "; this camera serves " + list
+		}
+		res.StatusMessage = "Not Found: /" + path + " " + hint
+	} else if cam := cameraOfPath(path); stream != "main" && s.battery != nil && s.battery(cam) {
+		res.StatusMessage = "Not Found: " + cam + " is a battery camera and serves only /" + cam + " over RTSP"
+		hint = "is not served: " + cam + " is a battery camera, and over RTSP it serves only /" + cam +
+			", which a recorder can hold open while the camera sleeps. Its " + stream +
+			" stream plays on reostream's page while someone watches"
+	} else {
+		res.StatusMessage = "Not Found: this camera serves " + list + "; turn " + stream + " on in reostream to serve /" + path
+		hint = "is not served; this camera serves " + list + ". " + config.HowToServe(stream)
 	}
-	list := strings.Join(others, ", ")
-	res.StatusMessage = "Not Found (this camera serves " + list + ")"
-	path = strings.Trim(path, "/")
 	s.mu.Lock()
 	first := !s.hinted[path]
 	if s.hinted == nil {
@@ -318,9 +358,30 @@ func (s *Server) notFound(path string) *base.Response {
 	s.hinted[path] = true
 	s.mu.Unlock()
 	if first {
-		log.Printf("rtsp: /%s is not served; this camera serves %s", path, list)
+		log.Printf("rtsp: /%s %s", path, hint)
 	}
 	return res
+}
+
+// streamOfPath is the stream a path names: what its suffix says, else main.
+// cameraOfPath is the camera name a path starts with: the path without its
+// stream suffix.
+func cameraOfPath(path string) string {
+	for _, suf := range streamSuffixes {
+		if cam, cut := strings.CutSuffix(path, suf); cut && cam != "" {
+			return cam
+		}
+	}
+	return path
+}
+
+func streamOfPath(path string) string {
+	for _, suf := range streamSuffixes {
+		if cam, cut := strings.CutSuffix(path, suf); cut && cam != "" {
+			return strings.TrimPrefix(suf, "_")
+		}
+	}
+	return "main"
 }
 
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {

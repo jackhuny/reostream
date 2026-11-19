@@ -283,8 +283,9 @@ camera from the NVR does not put the old password back. reostream then gets
 
 To avoid it, give each camera a password before an NVR or hub goes on the same network, or
 turn that switch off. To recover a camera it has already taken, either add the camera
-through the NVR (its address and channel, as above, with the NVR's login), or add it back to
-the NVR and use the NVR's own camera settings to set a password you choose.
+through the NVR (its address and channel, as above, with the NVR's login), add it back to
+the NVR and use the NVR's own camera settings to set a password you choose, or factory reset
+the camera and set it up again with the NVR's switch off.
 
 ## Control page
 
@@ -331,13 +332,32 @@ which of its streams are served; cameras added from the page serve all of them. 
 the `[rtsp]` section to turn it off.
 
 Serves `rtsp://host:8561/<cam>`, `<cam>_sub` and `<cam>_extern`, plus `<cam>_zoom` and
-`<cam>_zoom_sub` for a TrackMix's zoom lens (add `"zoom_sub"` to the camera's `streams`
-for the lighter one, 896x512, e.g. for Frigate's detect role). TCP interleaved is the default; UDP is offered, but a lost packet is
+`<cam>_zoom_sub` for a second lens (the TrackMix's zoom). TCP interleaved is the default; UDP is offered, but a lost packet is
 a corrupt frame. Read over TCP (`-rtsp_transport tcp` for ffmpeg; go2rtc and Frigate's
 presets already do): a 16 MP keyframe is hundreds of UDP packets, and a Duo 3 main stream
 read over UDP had 101 of 394 frames damaged even on loopback. Frames dropped further on,
 between go2rtc and Frigate, show only in go2rtc's `/api/streams`, as a `drops` count on a
 reader's `senders`.
+
+### The zoom lens
+
+A two-lens camera (TrackMix, Omvi 3i and other two-lens models) says so when reostream logs in,
+and its zoom lens is served as two more streams: `zoom`, at full size, and `zoom_sub`, small
+(896x512 on a TrackMix, e.g. for Frigate's detect role).
+
+- Adding the camera (Setup, or the network scan) lists both, ticked. Untick `zoom` if
+  another app needs the camera's main stream: the camera serves its main streams to two
+  viewers at most, and `main` and `zoom` are one each. `zoom_sub` costs no main slot.
+- A camera already added without them: its Live tab offers **Add zoom_sub** and **Add zoom
+  and zoom_sub**, and the Cameras page has a tick box for each. Either way they are added to
+  the camera's `streams` (and its `rtsp` list, when it has one) and reostream reloads.
+  Nothing is added until you ask.
+- By hand: add `"zoom"` and/or `"zoom_sub"` to the camera's `streams` and `rtsp` lists.
+
+A recorder asking for a stream that is not turned on gets a 404, and the log says which
+streams that camera does serve and how to turn the missing one on. A stream that is on but
+has had no video from the camera yet (both main slots in use elsewhere, say) is listed with
+"(no video yet)", and asking for it says so instead.
 
 ### A login for the streams
 
@@ -503,8 +523,8 @@ password = "$BACKYARD_PW"
 - Motion: live, with nothing to set up. When the camera wakes for motion, reostream wakes
   its stream within about a second, so the presence stream carries the motion live, and
   reports it (`reostream/<camera>/motion` on MQTT). See [Motion](#motion) below.
-- Listing `streams` on a battery camera streams it all the time. Only do that on one with
-  constant power.
+- Its streams stay on demand whatever `streams` lists. Only `always_on` (below) keeps it
+  awake, and only on one with constant power.
 
 ### Battery cameras in Frigate
 
@@ -535,18 +555,23 @@ cameras:
 
 #### Motion
 
-Live motion works with nothing to set up. reostream asks the camera once a second whether it
-is asleep; the camera's low-power chip answers without waking it. When the camera's motion
-sensor wakes it to record, reostream sees it within about a second and:
+Live motion works with nothing to set up. reostream searches the camera once a second, which
+the camera answers without waking. Asleep, it answers slowly, at its Wi-Fi's power-save pace
+(about 20 to 500 ms). When its motion sensor wakes it to record, it answers within a few ms
+for as long as it records, and reostream takes three such answers in a row as motion, 5 to
+7 seconds after the motion starts. It then:
 
 - wakes the stream for 30 seconds, so the presence stream, and Frigate recording it, carries
   the motion live instead of the last picture
 - reports it like a wired camera's alerts: `<prefix>/<camera>/motion` on MQTT, and a Frigate
   event with `frigate_motion = true` (both need an `[events]` section)
 
-The camera only needs motion recording on, as it is out of the box. Opening the camera in
-the Reolink app wakes it too, and that looks the same from the network, so it also counts as
-motion. reostream's own sessions (a viewer, the camera page) never do.
+The camera only needs motion recording on, as it is out of the box. reostream has to be on
+the camera's local network: from further away (a VPN, another site) the answers are never
+that fast, motion is missed, and the log says so after 10 minutes. Opening the camera in the
+Reolink app, or another reostream showing it, is not motion: reostream logs that another
+client connected. Its own sessions (a viewer, the camera page) are not motion either. Motion
+that happens while any client is connected cannot be seen this way.
 
 To keep the clips themselves, turn on **Auto-save motion clips** on the camera's page. The
 camera then uploads each motion clip to reostream, which saves it on your disk and plays it
@@ -567,4 +592,11 @@ always_on = true
 ```
 
 Off by default. On a battery, even with solar, it drains the camera in days.
+
+#### A battery camera that will not add
+
+A battery camera bound to a Reolink cloud account can refuse to add, even with the right
+UID and a password just set in the app. Factory reset it, set it up again in the app as a
+local camera, not under a cloud account, give it a password, and add it to reostream
+again.
 

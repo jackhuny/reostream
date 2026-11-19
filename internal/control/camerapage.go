@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/VoltTech21/reostream/internal/baichuan"
+	"github.com/VoltTech21/reostream/internal/cgi"
 	"github.com/VoltTech21/reostream/internal/config"
 )
 
@@ -49,10 +50,19 @@ type cameraPage struct {
 	Streams []liveStream
 	// Battery is a camera that sleeps; its Live tab wakes it while open.
 	Battery bool
+	// WakeOnClick is a battery camera that is not kept streaming
+	// (always_on): its Live tab shows Still, its last picture, with a play
+	// button, and wakes it only when that (or a stream) is clicked. Still
+	// and StillNote are empty before its first wake.
+	WakeOnClick      bool
+	Still, StillNote string
 	// CopyURLs is the Live tab's Copy URL list.
 	CopyURLs []copyURL
 	// Dewarp is true for a fisheye, whose Live tab links the browser dewarp.
 	Dewarp bool
+	// ZoomOffer is a camera with a zoom lens whose zoom streams are not
+	// pulled: the Live tab offers to turn them on (zoomstreams.go).
+	ZoomOffer bool
 
 	// Clips is the Auto-save motion clips section.
 	Clips clipsView
@@ -147,6 +157,14 @@ type cameraPage struct {
 	// carries, repeated here because the floodlight form lives outside
 	// Groups and so cannot read it off a Group.
 	FloodlightConfirm string
+	// FloodlightBC says the light is driven over the media port, on a
+	// camera with no web API (bclight.go): on and off now only, with
+	// FloodlightMode, what it does by itself, shown beside them.
+	FloodlightBC   bool
+	FloodlightMode string
+	// HasSiren is the Support block's audioAlarm: the Live tab offers the
+	// siren button.
+	HasSiren bool
 	// HasStitch is the Support block's binoCfg: the camera has two lenses
 	// and a seam between them. Measured as the exact inverse of fishEye on
 	// this fleet, which is the physical fact -- one lens has no seam, two
@@ -387,11 +405,23 @@ func (s *Server) serveCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	page.Head = s.camHeadFor(r.Context(), cam, "live", "")
 	page.CopyURLs = s.copyURLsFor(r, cam)
-	page.Support = s.identFor(r.Context(), cam).Support
+	// A battery camera is not woken for its page being opened (see
+	// identForView): its support block is the one read last, and the
+	// floodlight and presets are not read unless asked for (?presets=1,
+	// the presets card's own link). A battery camera has no web API for
+	// the floodlight read in any case.
+	sleeper := cam.UID != ""
+	id := s.identForView(r.Context(), cam)
+	page.Support = id.Support
+	page.ZoomOffer = s.zoomOffer(cam, id)
 	page.Dewarp = page.Support != nil && page.Support.HasFishEye(0)
 	// The floodlight quick action, only on a camera that says it has one.
+	// A battery camera's is offered unread, so that opening the page does
+	// not wake it; pressing it does.
 	if page.Support != nil && page.Support.HasFloodlight(0) {
-		if c, err := s.cgiDial(cam); err == nil {
+		if sleeper {
+			page.HasFloodlight, page.FloodlightBC = true, true
+		} else if c, viaBaichuan, err := s.lightWebAPI(cam); c != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), readTimeout*2)
 			if mode, state, err := readFloodlight(ctx, c, cam.Channel); err == nil {
 				page.HasFloodlight = true
@@ -399,9 +429,19 @@ func (s *Server) serveCamera(w http.ResponseWriter, r *http.Request) {
 			}
 			cancel()
 			c.Close()
+		} else if viaBaichuan && err == nil {
+			ctx, cancel := context.WithTimeout(r.Context(), readTimeout*2)
+			if l, err := s.readFloodlightBC(ctx, cam); err == nil {
+				page.HasFloodlight, page.FloodlightBC = true, true
+				page.FloodlightCurrent = bcLightState(l)
+			}
+			cancel()
 		}
 	}
-	if page.Support != nil && page.Support.HasPTZ() {
+	page.HasSiren = page.Support != nil && page.Support.HasSiren()
+	if page.Support != nil && page.Support.HasPTZ() && sleeper && r.URL.Query().Get("presets") == "" {
+		page.PTZ = ptzView{Speed: ptzSpeed, SpeedMin: ptzSpeedMin, SpeedMax: ptzSpeedMax, Unread: true}
+	} else if page.Support != nil && page.Support.HasPTZ() {
 		ctx, cancel := context.WithTimeout(r.Context(), readTimeout*2)
 		page.PTZ = s.readPresets(ctx, cam)
 		cancel()
@@ -416,6 +456,15 @@ func (s *Server) serveCamera(w http.ResponseWriter, r *http.Request) {
 	if page.Battery {
 		// The public listener refuses a battery camera's stream.
 		base = ""
+		// Opening the page used to start the sub stream by itself, and
+		// that woke the camera just as the ident read did (6e85c6f): a
+		// look at the page cost battery. It now shows the last picture and
+		// waits for a click, like the camera's fleet tile. An always_on
+		// camera streams anyway, so it plays at once as before.
+		if !s.alwaysOnCameras()[cam.Name] {
+			page.WakeOnClick = true
+			page.Still, page.StillNote = s.batteryStill(cam.Name, codecs)
+		}
 	}
 	for _, row := range page.Group.Rows {
 		name := streamOf(row.Name)
@@ -578,11 +627,38 @@ func (s *Server) serveCameraSettings(w http.ResponseWriter, r *http.Request) {
 
 	// The CGI-side controls, each only on the category that shows it.
 	needCGI := map[string]bool{"streams": true, "view": true, "stitch": true, "lights": true, "audio": true}[cat]
+	// opened is the lights page's web API session, when it has one, for
+	// the block below to use rather than log in twice.
+	var opened *cgi.Client
+	if cat == "lights" && (page.Support == nil || page.Support.HasFloodlight(0)) {
+		// A camera with no web API has its light over the media port.
+		ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+		if c, viaBaichuan, _ := s.lightWebAPI(cam); c != nil {
+			opened = c
+		} else if viaBaichuan {
+			needCGI = false
+			page.HasFloodlight, page.FloodlightBC = true, true
+			page.FloodlightOptions = bcFloodlightOptions
+			if l, err := s.readFloodlightBC(ctx, cam); err != nil {
+				page.FloodlightErr = fmt.Sprintf("could not read the floodlight: %v", err)
+			} else {
+				page.FloodlightCurrent, page.FloodlightMode = bcLightState(l), l.Mode
+			}
+		}
+		cancel()
+	}
 	if needCGI {
 		ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
 		defer cancel()
-		c, cgiErr := s.cgiDial(cam)
-		if cgiErr != nil {
+		c, cgiErr := opened, error(nil)
+		if c == nil {
+			c, cgiErr = s.cgiDial(cam)
+		}
+		if cgiErr != nil && cat == "audio" && (cam.UID != "" || cgi.Unreachable(cgiErr)) {
+			// The speaker and siren groups above are Baichuan blocks and
+			// already drawn; a camera with no web API is not an error
+			// here.
+		} else if cgiErr != nil {
 			page.CGIErr = fmt.Sprintf("could not connect: %v", cgiErr)
 		} else {
 			defer c.Close()

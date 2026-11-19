@@ -509,6 +509,7 @@ var routePatterns = []string{
 	"POST /settings/nvr",
 	"POST /cameras/{name}/netport",
 	"POST /cameras/{name}/talkgain",
+	"POST /cameras/{name}/zoom",
 	"POST /cameras/{name}/ptz",
 	"POST /cameras/{name}/copy",
 	"GET /cameras/{name}/raw",
@@ -523,12 +524,14 @@ var routePatterns = []string{
 	"POST /cameras/{name}/ptz/calibrate",
 	"POST /cameras/{name}/ptz/guardpos",
 	"GET /cameras/{name}/osd",
+	"GET /cameras/{name}/snapshot.jpg",
 	"POST /cameras/{name}/floodlight",
 	"POST /cameras/{name}/fisheye",
 	"GET /cameras/{name}/view",
 	"POST /cameras/{name}/stitch",
 	"POST /cameras/{name}/encoding",
 	"POST /cameras/{name}/siren",
+	"POST /cameras/{name}/siren/sound",
 	"GET /cameras/{name}/talk",
 	"GET /cameras/{name}/align",
 	"GET /cameras/{name}/time",
@@ -625,6 +628,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /cameras/{name}/settings/{cat}", s.wrap(http.HandlerFunc(s.serveCameraSettings)))
 	mux.Handle("POST /cameras/{name}/netport", s.wrap(http.HandlerFunc(s.serveApplyNetPort)))
 	mux.Handle("POST /cameras/{name}/talkgain", s.wrap(http.HandlerFunc(s.serveTalkGain)))
+	mux.Handle("POST /cameras/{name}/zoom", s.wrap(http.HandlerFunc(s.serveZoomStreams)))
 	mux.Handle("POST /cameras/{name}/ptz", s.wrap(http.HandlerFunc(s.serveApplyPtz)))
 	mux.Handle("POST /cameras/{name}/copy", s.wrap(http.HandlerFunc(s.serveCopySection)))
 	mux.Handle("GET /cameras/{name}/raw", s.wrap(http.HandlerFunc(s.serveRawValues)))
@@ -644,12 +648,18 @@ func (s *Server) Handler() http.Handler {
 	// own document, change one field, send it back), and a second write
 	// path is exactly how a composed document reaches a camera.
 	mux.Handle("GET /cameras/{name}/osd", s.wrap(http.HandlerFunc(s.serveOSD)))
+	// A picture the camera makes, waking a battery camera for it. A GET
+	// and behind the login like everything else here: it opens a session
+	// on the camera, which on a battery camera costs battery, so it is not
+	// something an unauthenticated request may cause. See snapshot.go.
+	mux.Handle("GET /cameras/{name}/snapshot.jpg", s.wrap(http.HandlerFunc(s.serveSnapshot)))
 	mux.Handle("POST /cameras/{name}/floodlight", s.wrap(http.HandlerFunc(s.serveApplyFloodlight)))
 	mux.Handle("POST /cameras/{name}/fisheye", s.wrap(http.HandlerFunc(s.serveApplyFisheye)))
 	mux.Handle("GET /cameras/{name}/view", s.wrap(http.HandlerFunc(s.serveFisheyeView)))
 	mux.Handle("POST /cameras/{name}/stitch", s.wrap(http.HandlerFunc(s.serveApplyStitch)))
 	mux.Handle("POST /cameras/{name}/encoding", s.wrap(http.HandlerFunc(s.serveApplyEncoding)))
 	mux.Handle("POST /cameras/{name}/siren", s.wrap(http.HandlerFunc(s.serveApplySiren)))
+	mux.Handle("POST /cameras/{name}/siren/sound", s.wrap(http.HandlerFunc(s.serveSoundSiren)))
 	mux.Handle("GET /cameras/{name}/talk", s.wrap(http.HandlerFunc(s.serveTalk)))
 	mux.Handle("GET /cameras/{name}/align", s.wrap(http.HandlerFunc(s.serveAlign)))
 	mux.Handle("GET /cameras/{name}/time", s.wrap(http.HandlerFunc(s.serveTime)))

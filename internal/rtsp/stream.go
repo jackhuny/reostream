@@ -17,6 +17,9 @@ import (
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtpmpeg4audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/pion/rtp"
 
@@ -67,6 +70,40 @@ type videoEncoder interface {
 	Encode(au [][]byte) ([]*rtp.Packet, error)
 }
 
+// encodeEach packetizes one access unit with every NAL unit in packets of
+// its own: a single NAL unit packet when it fits, fragmentation units when
+// it does not, and never an aggregation packet (H.265 type 48, H.264
+// STAP-A). The marker bit is set only on the last packet of the access
+// unit, which is what tells a reader the picture is complete.
+//
+// The encoders batch NAL units small enough to share a packet into an
+// aggregation packet, which the RFCs allow and some readers mishandle.
+// go2rtc 1.9.10 passes an H.265 aggregation packet into its MP4 output as
+// one NAL unit instead of unpacking it, so a browser behind it decodes
+// pictures with slices missing and freezes (#25: a Duo 2 whose small
+// P-frame slices, smaller still with the floodlight on, landed in one
+// packet). The camera's own RTSP server never aggregates, so neither does
+// this: handing the encoder one NAL unit at a time leaves it nothing to
+// batch, and the sequence numbers still run on because it is one encoder.
+func encodeEach(enc videoEncoder, au [][]byte) ([]*rtp.Packet, error) {
+	var pkts []*rtp.Packet
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			// Encode panics on an empty NAL unit; there is nothing to send.
+			continue
+		}
+		p, err := enc.Encode([][]byte{nalu})
+		if err != nil {
+			return nil, err
+		}
+		pkts = append(pkts, p...)
+	}
+	for i, p := range pkts {
+		p.Marker = i == len(pkts)-1
+	}
+	return pkts, nil
+}
+
 // Stream is one camera stream served over RTSP. It implements
 // stream.FrameSink.
 //
@@ -106,6 +143,9 @@ type Stream struct {
 	audioClock *ts.AudioClock
 	videoClock *ts.Clock
 	lastVideo  uint64 // last video PTS in 90 kHz ticks, for the audio clock
+	// lastMicros is that frame's Micros, which places an audio frame that
+	// states its own time (see audioRTPTime).
+	lastMicros uint32
 
 	// Set by Connected and cleared by the first video frame and the first
 	// keyframe of the new connection respectively. See Connected.
@@ -366,6 +406,9 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 	now := s.wallNow()
 	if s.videoClock == nil {
 		s.videoClock = ts.NewClock()
+		// Read under s.mu, as every PTS call is, so the arrival it
+		// sees is this frame's (#33; see ts.Clock.UseArrival).
+		s.videoClock.UseArrival(s.wallNow)
 		// The clock's first frame is PTS zero, so the epoch is the wall
 		// clock at that frame, not when the stream was registered: a camera
 		// that took longer to answer this run than the last would otherwise
@@ -382,7 +425,7 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 	}
 	s.lastVideoWall = now
 	ts90 := s.videoClock.PTS(f.Micros)
-	s.lastVideo = ts90
+	s.lastVideo, s.lastMicros = ts90, f.Micros
 	epoch := s.epoch90
 	s.mu.Unlock()
 
@@ -406,7 +449,7 @@ func (s *Stream) videoFrame(f baichuan.Frame) {
 		return
 	}
 
-	pkts, err := enc.Encode(nalus)
+	pkts, err := encodeEach(enc, nalus)
 	if err != nil {
 		return
 	}
@@ -517,16 +560,29 @@ func (s *Stream) observeAudio(f baichuan.Frame) {
 // samples emitted since, which is what the TS muxer already does; see
 // ts.AudioClock and the incident recorded there.
 //
+// A sink that does know where its audio sits, the presence stream playing a
+// clip's audio in beside its picture, says so in Micros, on the same clock
+// as its video; no camera sets it. The frame is then placed there, to the
+// tick, rather than within a second of the picture (ts.AudioClock.PTSAt).
+//
 // RTP for AAC runs at the sample rate, not at 90 kHz, so the reconstructed
 // 90 kHz value is converted down.
 func (s *Stream) audioRTPTime(f baichuan.Frame) (uint32, time.Time) {
 	s.mu.Lock()
-	clock, lastVideo, cfg, epoch := s.audioClock, s.lastVideo, s.audioCfg, s.epoch90
+	clock, lastVideo, lastMicros, cfg, epoch := s.audioClock, s.lastVideo, s.lastMicros, s.audioCfg, s.epoch90
 	s.mu.Unlock()
 	if clock == nil || cfg == nil {
 		return 0, time.Now()
 	}
-	pts90 := clock.PTS(lastVideo, f.Data)
+	var pts90 uint64
+	if f.Micros != 0 {
+		// Signed, so audio a little behind the latest picture lands
+		// behind it; across the uint32 wrap like the video clock.
+		at := int64(lastVideo) + int64(int32(f.Micros-lastMicros))*9/100
+		pts90 = clock.PTSAt(uint64(max(at, 0)), f.Data)
+	} else {
+		pts90 = clock.PTS(lastVideo, f.Data)
+	}
 	return uint32((pts90 + epoch) * uint64(cfg.SampleRate) / rtpClockHz), ntpOf90(pts90 + epoch)
 }
 
@@ -623,6 +679,13 @@ func (s *Stream) initialize(f baichuan.Frame) error {
 		if err := ss.Initialize(); err != nil {
 			return err
 		}
+		// Before s.ss is set, so no reader can be attached yet and the
+		// packets reach nobody. See primeRTPInfo.
+		at := wallEpoch90(s.wallNow())
+		primeRTPInfo(ss, media, nextSequenceNumber(enc), rtpClockHz, at)
+		if audioMedia != nil {
+			primeRTPInfo(ss, audioMedia, nextSequenceNumber(audioEnc), audioCfg.SampleRate, at)
+		}
 		s.ss = ss
 	}
 	s.desc, s.video, s.enc, s.ready = desc, media, enc, true
@@ -633,6 +696,56 @@ func (s *Stream) initialize(f baichuan.Frame) error {
 	}
 	s.pendingKey = nil
 	return nil
+}
+
+// primeRTPInfo writes one empty packet to a media of a server stream that
+// has no readers yet, stamped at t90 on the stream's timeline, so that
+// gortsplib has a point to compute the first reader's RTP-Info from.
+//
+// gortsplib answers PLAY with an RTP-Info rtptime for a media only once it
+// has written a packet on it, and nothing is packetized here until someone
+// reads (see videoFrame), so the first reader of every stream was told
+// where no media starts. ffmpeg then starts each media's clock at that
+// media's own first packet, and when each media's first sender report
+// arrives it moves that media onto the report's timeline. The first video
+// report waits for a keyframe, so seconds in, the media whose first packet
+// sat later on the timeline steps back by the difference: on the emulated
+// Duo 2 (2026-11-04) the first keyframe repeated the timestamp of the frame
+// before it, and in the 2026-11-03 firmware sweep 32 of 212 RTSP captures,
+// every one the first reader after a restart, had one "non monotonically
+// increasing dts". Frigate's recorder is that first reader after every
+// restart of reostream, and after every camera reconnect that rebuilds the
+// description. With rtptime for every media, all from one point on one
+// timeline, a reader starts every media at the same instant and the sender
+// reports agree with where it started.
+//
+// The mapping has to be the one real packets use: RTP time is the timeline
+// in the media's clock rate, and the wall time is ntpOf90 of the same
+// timeline. The sequence number is one before the encoder's first, so the
+// RTP-Info seq names the first packet the reader will actually get.
+func primeRTPInfo(ss *gortsplib.ServerStream, m *description.Media, seq uint16, rate int, t90 uint64) {
+	_ = ss.WritePacketRTPWithNTP(m, &rtp.Packet{
+		Header: rtp.Header{
+			Version:        2,
+			PayloadType:    m.Formats[0].PayloadType(),
+			SequenceNumber: seq - 1,
+			Timestamp:      uint32(t90 * uint64(rate) / rtpClockHz),
+		},
+	}, ntpOf90(t90))
+}
+
+// nextSequenceNumber is the sequence number of the first packet an encoder
+// will produce.
+func nextSequenceNumber(e any) uint16 {
+	switch e := e.(type) {
+	case *rtph265.Encoder:
+		return *e.InitialSequenceNumber
+	case *rtph264.Encoder:
+		return *e.InitialSequenceNumber
+	case *rtpmpeg4audio.Encoder:
+		return *e.InitialSequenceNumber
+	}
+	return 0
 }
 
 // videoFormat builds the RTP format, parameter sets included, from the
