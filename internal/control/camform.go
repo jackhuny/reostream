@@ -132,6 +132,7 @@ func applyCameraForm(cfg *config.Config, form url.Values) error {
 		// which is another camera.
 		cam.Channel = existing.Channel
 		cam.NVRZoomPin = existing.NVRZoomPin
+		cam.NVRTelephoto = existing.NVRTelephoto
 		// Nor has it fields for these, so an edit keeps them too: saving
 		// the form used to drop a battery camera's motion_topic.
 		cam.HoldPicture = existing.HoldPicture
@@ -242,6 +243,9 @@ func (s *Server) camerasPage(ctx context.Context) camerasPage {
 // and zoom_sub only when the camera has a zoom lens; a battery camera main
 // and sub only. A stream already set always stays, so it can be turned off.
 func (s *Server) availableStreams(ctx context.Context, raw config.Camera) []string {
+	if raw.NVRTelephoto {
+		return []string{"main", "sub"}
+	}
 	have := map[string]bool{"main": true, "sub": true}
 	if raw.UID == "" {
 		if cam, err := s.byName(raw.Name); err == nil {
@@ -307,6 +311,9 @@ func cameraBlockText(cam config.Camera) string {
 			quoted[i] = fmt.Sprintf("%q", v)
 		}
 		fmt.Fprintf(&b, "%s = [%s]\n", key, strings.Join(quoted, ", "))
+	}
+	if cam.NVRTelephoto {
+		b.WriteString("nvr_telephoto = true\n")
 	}
 	if cam.NVRZoomPin != "" {
 		fmt.Fprintf(&b, "nvr_zoom_tls_sha256 = %q\n", cam.NVRZoomPin)

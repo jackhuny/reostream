@@ -31,6 +31,8 @@ type Camera struct {
 
 	// NVRZoomPin selects the recorder HTTPS-FLV telephoto feed and pins its TLS certificate.
 	NVRZoomPin string `toml:"nvr_zoom_tls_sha256"`
+	// NVRTelephoto presents the recorder lens as an independent camera with main and sub streams.
+	NVRTelephoto bool `toml:"nvr_telephoto"`
 
 	// UID marks a battery camera, reached over UDP by this id instead of
 	// TCP port 9000.
@@ -75,6 +77,16 @@ type Camera struct {
 	// whatever it is set to. A tester found full scale overdrove an E1
 	// Zoom's speaker and -12 dB was clear and plenty loud.
 	TalkGainDB int `toml:"talk_gain_db"`
+}
+
+func (cam Camera) inputStream(st string) string {
+	if cam.NVRTelephoto {
+		if st == "main" {
+			return "zoom"
+		}
+		return "zoom_sub"
+	}
+	return st
 }
 
 // RTSPConfig configures the RTSP listener. Its absence turns RTSP off
@@ -410,6 +422,9 @@ func (c *Config) Validate() error {
 		if cam.AlwaysOn && cam.UID == "" {
 			return fmt.Errorf("camera %q: always_on is for a battery camera, one with a uid", cam.Name)
 		}
+		if cam.NVRTelephoto && (cam.NVRZoomPin == "" || cam.UID != "") {
+			return fmt.Errorf("camera %q: nvr_telephoto needs a wired recorder and its TLS pin", cam.Name)
+		}
 		if cam.NVRZoomPin != "" {
 			pin, err := hex.DecodeString(cam.NVRZoomPin)
 			if err != nil || len(pin) != sha256.Size {
@@ -431,6 +446,9 @@ func (c *Config) Validate() error {
 		}
 		seenStreams := make(map[string]bool, len(cam.Streams))
 		for _, s := range cam.Streams {
+			if cam.NVRTelephoto && s != "main" && s != "sub" {
+				return fmt.Errorf("camera %q: nvr_telephoto supports main and sub", cam.Name)
+			}
 			if !validStreamNames[s] {
 				return fmt.Errorf("camera %q: unknown stream %q", cam.Name, s)
 			}
@@ -447,7 +465,7 @@ func (c *Config) Validate() error {
 			naddr = fmt.Sprintf("%s#%d", naddr, cam.Channel)
 		}
 		for _, s := range cam.Streams {
-			if owner, taken := seenAddrStreams[naddr][s]; taken {
+			if owner, taken := seenAddrStreams[naddr][cam.inputStream(s)]; taken {
 				return fmt.Errorf("camera %q and camera %q share address %q on stream %q: "+
 					"a camera allows only one connection per stream, and a second runner "+
 					"against the same one gets a session the camera refuses",
@@ -458,7 +476,7 @@ func (c *Config) Validate() error {
 			seenAddrStreams[naddr] = make(map[string]string, len(cam.Streams))
 		}
 		for _, s := range cam.Streams {
-			seenAddrStreams[naddr][s] = cam.Name
+			seenAddrStreams[naddr][cam.inputStream(s)] = cam.Name
 		}
 
 		for _, want := range cam.RTSP {

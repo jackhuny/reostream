@@ -12,7 +12,7 @@ import (
 )
 
 func TestNVRZoomRecorderRequest(t *testing.T) {
-	for _, tc := range []struct{ stream, want string }{{"zoom", "channel6_telephoto_main.bcs"}, {"zoom_sub", "channel6_telephoto_sub.bcs"}} {
+	for _, tc := range []struct{ stream, want string }{{"zoom", "channel6_telephoto_main.bcs"}, {"zoom_sub", "channel6_telephoto_sub.bcs"}, {"main", "channel6_telephoto_main.bcs"}, {"sub", "channel6_telephoto_sub.bcs"}} {
 		t.Run(tc.stream, func(t *testing.T) {
 			hit := make(chan string, 1)
 			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

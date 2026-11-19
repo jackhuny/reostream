@@ -106,7 +106,7 @@ func runNative(ctx context.Context, cfg Config, h *hub.Hub, path string) (err er
 			return fmt.Errorf("stream: %s: no video frame in %s from the camera's RTSP server", cfg.Name, mediaTimeout)
 		case f := <-frames:
 			timer.Reset(mediaTimeout)
-			if err := publishNativeVideo(cfg, h, out, &mux, f); err != nil {
+			if err := publishNativeVideo(cfg, h, out, &mux, f, false); err != nil {
 				return err
 			}
 		}
@@ -273,15 +273,12 @@ func NativeInfo(ctx context.Context, address, username, password, stream string)
 	return "", 0, 0, fmt.Errorf("no H.264 or H.265 video in the camera's %s", path)
 }
 
-func publishNativeVideo(cfg Config, h *hub.Hub, out *tsOutput, mux **ts.Muxer, f baichuan.Frame) error {
+func publishNativeVideo(cfg Config, h *hub.Hub, out *tsOutput, mux **ts.Muxer, f baichuan.Frame, audio bool) error {
 	if *mux == nil {
 		if f.Kind != baichuan.FrameIFrame {
 			return nil
 		}
-		// Video only: no audio is carried from the camera's RTSP,
-		// and a declared audio track that never gets any data
-		// leaves a browser's player waiting for it, never playing.
-		nm, changed, err := out.muxer(f.Codec, false, time.Now())
+		nm, changed, err := out.muxer(f.Codec, audio, time.Now())
 		if err != nil {
 			return fmt.Errorf("stream: %s: %w", cfg.Name, err)
 		}

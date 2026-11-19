@@ -476,3 +476,19 @@ func TestTalkGainIsMinusTwelveToTwelveInStepsOfThree(t *testing.T) {
 		}
 	}
 }
+
+func TestSeparateRecorderLens(t *testing.T) {
+	wide := Camera{Name: "yard", Address: "192.0.2.10", Channel: 6, Streams: []string{"main", "sub"}}
+	tele := wide
+	tele.Name = "yard_zoom"
+	tele.NVRTelephoto = true
+	tele.NVRZoomPin = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cfg := Config{Cameras: []Camera{wide, tele}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cameras[0].Streams = append(cfg.Cameras[0].Streams, "zoom")
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("duplicate telephoto input accepted")
+	}
+}

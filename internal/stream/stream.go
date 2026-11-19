@@ -103,14 +103,15 @@ type SpeakerSink interface {
 }
 
 type Config struct {
-	Name       string
-	Address    string
-	Username   string
-	Password   string
-	NVRZoomPin string
-	Stream     string // "main", "sub" or "extern"
-	Channel    int    // the camera's channel on a hub or NVR; 0 on its own
-	UID        string // a battery camera's UID; empty for one on TCP
+	Name         string
+	Address      string
+	Username     string
+	Password     string
+	NVRTelephoto bool
+	NVRZoomPin   string
+	Stream       string // "main", "sub" or "extern"
+	Channel      int    // the camera's channel on a hub or NVR; 0 on its own
+	UID          string // a battery camera's UID; empty for one on TCP
 
 	// HoldPicture is the camera's hold_picture setting (see config.Camera).
 	HoldPicture bool
@@ -179,7 +180,7 @@ func Run(ctx context.Context, cfg Config, h *hub.Hub) (err error) {
 	defer h.MarkDisconnected()
 
 	zoom := isZoom(cfg.Stream)
-	if zoom && cfg.NVRZoomPin != "" {
+	if (zoom || cfg.NVRTelephoto) && cfg.NVRZoomPin != "" {
 		return runNVRZoom(ctx, cfg, h)
 	}
 	if path, ok := nativePaths[cfg.Stream]; ok && (!zoom || zoomOverRTSP(cfg.Name, cfg.Stream)) {
