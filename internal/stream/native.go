@@ -106,34 +106,8 @@ func runNative(ctx context.Context, cfg Config, h *hub.Hub, path string) (err er
 			return fmt.Errorf("stream: %s: no video frame in %s from the camera's RTSP server", cfg.Name, mediaTimeout)
 		case f := <-frames:
 			timer.Reset(mediaTimeout)
-			if mux == nil {
-				if f.Kind != baichuan.FrameIFrame {
-					continue
-				}
-				// Video only: no audio is carried from the camera's RTSP,
-				// and a declared audio track that never gets any data
-				// leaves a browser's player waiting for it, never playing.
-				nm, changed, err := out.muxer(f.Codec, false, time.Now())
-				if err != nil {
-					return fmt.Errorf("stream: %s: %w", cfg.Name, err)
-				}
-				mux = nm
-				if changed {
-					h.SetHeader(mux.Header())
-				}
-			}
-			if f.Kind == baichuan.FrameIFrame || f.Kind == baichuan.FramePFrame {
-				out.lastVideo = time.Now()
-			}
-			if cfg.Sink != nil {
-				cfg.Sink.Frame(f)
-			}
-			if pkt, key := mux.FrameWithKey(f); pkt != nil {
-				h.PublishKey(pkt, key)
-				h.RecordFrame(len(pkt))
-			}
-			if f.Kind == baichuan.FrameIFrame {
-				h.SetKeyframe(f.Codec, f.Video())
+			if err := publishNativeVideo(cfg, h, out, &mux, f); err != nil {
+				return err
 			}
 		}
 	}
@@ -297,4 +271,37 @@ func NativeInfo(ctx context.Context, address, username, password, stream string)
 		return "H265", width, height, nil
 	}
 	return "", 0, 0, fmt.Errorf("no H.264 or H.265 video in the camera's %s", path)
+}
+
+func publishNativeVideo(cfg Config, h *hub.Hub, out *tsOutput, mux **ts.Muxer, f baichuan.Frame) error {
+	if *mux == nil {
+		if f.Kind != baichuan.FrameIFrame {
+			return nil
+		}
+		// Video only: no audio is carried from the camera's RTSP,
+		// and a declared audio track that never gets any data
+		// leaves a browser's player waiting for it, never playing.
+		nm, changed, err := out.muxer(f.Codec, false, time.Now())
+		if err != nil {
+			return fmt.Errorf("stream: %s: %w", cfg.Name, err)
+		}
+		*mux = nm
+		if changed {
+			h.SetHeader(nm.Header())
+		}
+	}
+	if f.Kind == baichuan.FrameIFrame || f.Kind == baichuan.FramePFrame {
+		out.lastVideo = time.Now()
+	}
+	if cfg.Sink != nil {
+		cfg.Sink.Frame(f)
+	}
+	if pkt, key := (*mux).FrameWithKey(f); pkt != nil {
+		h.PublishKey(pkt, key)
+		h.RecordFrame(len(pkt))
+	}
+	if f.Kind == baichuan.FrameIFrame {
+		h.SetKeyframe(f.Codec, f.Video())
+	}
+	return nil
 }

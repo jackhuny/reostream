@@ -131,6 +131,7 @@ func applyCameraForm(cfg *config.Config, form url.Values) error {
 		// has. Dropping it would quietly repoint a hub camera at channel 0,
 		// which is another camera.
 		cam.Channel = existing.Channel
+		cam.NVRZoomPin = existing.NVRZoomPin
 		// Nor has it fields for these, so an edit keeps them too: saving
 		// the form used to drop a battery camera's motion_topic.
 		cam.HoldPicture = existing.HoldPicture
@@ -252,6 +253,9 @@ func (s *Server) availableStreams(ctx context.Context, raw config.Camera) []stri
 			have["zoom_sub"] = id.Zoom
 		}
 	}
+	if raw.NVRZoomPin != "" {
+		have["zoom"] = true
+	}
 	for _, st := range raw.Streams {
 		have[st] = true
 	}
@@ -303,6 +307,9 @@ func cameraBlockText(cam config.Camera) string {
 			quoted[i] = fmt.Sprintf("%q", v)
 		}
 		fmt.Fprintf(&b, "%s = [%s]\n", key, strings.Join(quoted, ", "))
+	}
+	if cam.NVRZoomPin != "" {
+		fmt.Fprintf(&b, "nvr_zoom_tls_sha256 = %q\n", cam.NVRZoomPin)
 	}
 	if cam.Channel != 0 {
 		fmt.Fprintf(&b, "channel = %d\n", cam.Channel)

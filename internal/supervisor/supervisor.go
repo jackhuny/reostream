@@ -236,13 +236,14 @@ func newEntry(cam config.Camera, st string) *entry {
 		privacyKick: make(chan struct{}, 1),
 		rtsp:        cam.RTSP,
 		cfg: stream.Config{
-			Name:     cam.Name,
-			Address:  cam.Address,
-			Username: cam.Username,
-			Password: cam.Password,
-			Stream:   st,
-			Channel:  cam.Channel,
-			UID:      cam.UID,
+			Name:       cam.Name,
+			Address:    cam.Address,
+			Username:   cam.Username,
+			Password:   cam.Password,
+			Stream:     st,
+			Channel:    cam.Channel,
+			NVRZoomPin: cam.NVRZoomPin,
+			UID:        cam.UID,
 
 			HoldPicture: cam.HoldPicture,
 			Rotate:      cam.Rotate,
@@ -585,6 +586,7 @@ func sameStream(e *entry, cam config.Camera) bool {
 		e.alwaysOn == (onDemand && cam.AlwaysOn) &&
 		e.cfg.Address == cam.Address &&
 		e.cfg.Channel == cam.Channel &&
+		e.cfg.NVRZoomPin == cam.NVRZoomPin &&
 		e.cfg.UID == cam.UID &&
 		e.cfg.Username == cam.Username &&
 		e.cfg.Password == cam.Password &&

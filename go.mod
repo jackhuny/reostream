@@ -7,6 +7,7 @@ require (
 	github.com/bluenviron/gortsplib/v5 v5.6.5
 	github.com/bluenviron/mediacommon/v2 v2.9.4
 	github.com/gorilla/websocket v1.5.3
+	github.com/nareix/joy4 v0.0.0-20200507095837-05a4ffbb5369
 	github.com/pion/rtp v1.10.5
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0

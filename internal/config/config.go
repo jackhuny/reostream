@@ -5,6 +5,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -26,6 +28,9 @@ type Camera struct {
 	// camera is a numbered channel from 0. A camera on its own is always
 	// channel 0, which is also what leaving it out means.
 	Channel int
+
+	// NVRZoomPin selects the recorder HTTPS-FLV telephoto feed and pins its TLS certificate.
+	NVRZoomPin string `toml:"nvr_zoom_tls_sha256"`
 
 	// UID marks a battery camera, reached over UDP by this id instead of
 	// TCP port 9000.
@@ -404,6 +409,12 @@ func (c *Config) Validate() error {
 		}
 		if cam.AlwaysOn && cam.UID == "" {
 			return fmt.Errorf("camera %q: always_on is for a battery camera, one with a uid", cam.Name)
+		}
+		if cam.NVRZoomPin != "" {
+			pin, err := hex.DecodeString(cam.NVRZoomPin)
+			if err != nil || len(pin) != sha256.Size {
+				return fmt.Errorf("camera %q: nvr_zoom_tls_sha256 must be a 64-digit hex certificate fingerprint", cam.Name)
+			}
 		}
 		if cam.Channel < 0 || cam.Channel > 63 {
 			return fmt.Errorf("camera %q: channel %d is out of range (0 to 63)", cam.Name, cam.Channel)
