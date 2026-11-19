@@ -32,7 +32,17 @@ func (s *Server) zoomOffer(cam Camera, id camIdent) bool {
 		return false
 	}
 	c, ok := cameraNamed(cfg, cam.Name)
-	return ok && !slices.Contains(c.Streams, "zoom") && !slices.Contains(c.Streams, "zoom_sub")
+	return ok && !hasDedicatedZoom(cfg, c) && !slices.Contains(c.Streams, "zoom") && !slices.Contains(c.Streams, "zoom_sub")
+}
+
+// A dedicated recorder lens already exposes both zoom qualities as main and sub.
+func hasDedicatedZoom(cfg *config.Config, camera config.Camera) bool {
+	for _, other := range cfg.Cameras {
+		if other.NVRTelephoto && other.Channel == camera.Channel && config.NormalizeAddr(other.Address) == config.NormalizeAddr(camera.Address) {
+			return true
+		}
+	}
+	return false
 }
 
 // serveZoomStreams adds a camera's zoom streams to its config block and
@@ -71,6 +81,10 @@ func (s *Server) serveZoomStreams(w http.ResponseWriter, r *http.Request) {
 	cam, ok := cameraNamed(cfg, name)
 	if !ok {
 		http.Error(w, "no camera named "+name, http.StatusNotFound)
+		return
+	}
+	if hasDedicatedZoom(cfg, cam) {
+		flash("refused", "the zoom lens is already served as a separate camera")
 		return
 	}
 	served := len(cam.RTSP) > 0

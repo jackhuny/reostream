@@ -16,7 +16,7 @@ Reolink cameras --Baichuan--> reostream --RTSP--> go2rtc / Frigate / Blue Iris
 
 The `homelab/nvr-telephoto` branch adds independent main and sub feeds for compatible Reolink NVR telephoto channels. In the lens camera entry, set `nvr_telephoto = true`, the zero-based recorder `channel`, and `nvr_zoom_tls_sha256` to the verified SHA-256 fingerprint of the recorder certificate (64 hexadecimal digits). Enable `main` and `sub` in both `streams` and `rtsp`.
 
-The release workflow publishes versioned Linux amd64 and arm64 images to `ghcr.io/jackhuny/reostream`. For the telephoto release in this branch, pull `ghcr.io/jackhuny/reostream:0.2.7-homelab.2`.
+The release workflow publishes versioned Linux amd64 and arm64 images to `ghcr.io/jackhuny/reostream`. For the telephoto release in this branch, pull `ghcr.io/jackhuny/reostream:0.2.9-homelab.1`.
 
 ## Why
 
@@ -40,7 +40,7 @@ January 2025. reostream is a new implementation, not a fork.
 docker run -d --name reostream --restart unless-stopped \
   --network host \
   -v reostream-data:/data \
-  ghcr.io/jackhuny/reostream:0.2.7-homelab.2
+  ghcr.io/jackhuny/reostream:0.2.9-homelab.1
 
 docker logs reostream
 ```
